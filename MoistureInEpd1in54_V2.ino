@@ -1,16 +1,32 @@
-/* Includes ------------------------------------------------------------------*/
+//墨水屏显示
 #include "DEV_Config.h"
 #include "EPD.h"
 #include "GUI_Paint.h"
 #include "imagedata.h"
 #include <stdlib.h>
+//土壤湿度传感器
 #include "SoilMoisture.h"
+//空气温湿度传感器
 #include "DHT.h"
+//wifi
 #include <WiFiManager.h>
+//iot 连接阿里云
+#include <ArduinoJson.h>
+#include <AliyunIoTSDK.h>
+AliyunIoTSDK iot;
 
+//温湿度传感器pin脚和型号设置
 #define DHTPIN 3
 #define DHTTYPE DHT22 
 
+//连接阿里云的产品三元素
+#define PRODUCT_KEY "a1pZWJQ5QFI"
+#define DEVICE_NAME "plant_env_001"
+#define DEVICE_SECRET "ea832e7f37d81e5e3cb17273b2efd57b"
+#define REGION_ID "cn-shanghai"
+
+
+//值初始化
 int old_moisture = 0;
 int cur_moisture = 0;
 
@@ -18,6 +34,8 @@ float old_humidity = 0.0;
 float old_temperature = 0.0;
 float cur_humidity = 0.0;
 float cur_temperature = 0.0;
+
+static WiFiClient espClient;
 
 DHT dht(DHTPIN, DHTTYPE);
 
@@ -46,6 +64,21 @@ void setup()
       Serial.println("connected...yeey :)");
   }
 
+
+#if 0
+  AliyunIoTSDK::begin(espClient, PRODUCT_KEY, DEVICE_NAME, DEVICE_SECRET, REGION_ID);
+
+    // 绑定属性回调
+  AliyunIoTSDK::bindData("PowerSwitch", powerCallback);
+
+    // 操作用户自定义Topic
+  AliyunIoTSDK::subscribeUser("/get", callback);
+#else
+  iot.begin(espClient, PRODUCT_KEY, DEVICE_NAME, DEVICE_SECRET, REGION_ID);
+  iot.bindData("PowerSwitch", powerCallback);
+  iot.subscribeUser("/get", callback);
+#endif
+
   //空气温湿度初始化
   dht.begin();
   DEV_Delay_ms(2000);
@@ -59,57 +92,31 @@ void setup()
   old_humidity = cur_humidity;
   old_temperature = cur_temperature;
 
-  printf("EPD_1IN54_test v2 Demo\r\n");
+  printf("EPD_1IN54_test v2 Demo moisture %d\r\n",cur_moisture);
   DEV_Module_Init();
 
   initEpd();
 
   updateEpd(cur_moisture, cur_humidity, cur_temperature);
-
-
-
-#if 0   //Partial refresh, example shows time    
-
-    // The image of the previous frame must be uploaded, otherwise the
-    // first few seconds will display an exception.
-    EPD_1IN54_V2_Init();
-    EPD_1IN54_V2_DisplayPartBaseImage(BlackImage);
-    EPD_1IN54_V2_Init_Partial();
-    printf("Partial refresh\r\n");
-    Paint_SelectImage(BlackImage);
-    PAINT_TIME sPaint_time;
-    sPaint_time.Hour = 12;
-    sPaint_time.Min = 34;
-    sPaint_time.Sec = 56;
-    UBYTE num = 20;
-    for (;;) {
-        sPaint_time.Sec = sPaint_time.Sec + 1;
-        if (sPaint_time.Sec == 60) {
-            sPaint_time.Min = sPaint_time.Min + 1;
-            sPaint_time.Sec = 0;
-            if (sPaint_time.Min == 60) {
-                sPaint_time.Hour =  sPaint_time.Hour + 1;
-                sPaint_time.Min = 0;
-                if (sPaint_time.Hour == 24) {
-                    sPaint_time.Hour = 0;
-                    sPaint_time.Min = 0;
-                    sPaint_time.Sec = 0;
-                }
-            }
-        }
-        Paint_ClearWindows(15, 65, 15 + Font20.Width * 7, 65 + Font20.Height, WHITE);
-        Paint_DrawTime(15, 65, &sPaint_time, &Font20, WHITE, BLACK);
-        num = num - 1;
-        if(num == 0) {
-            break;
-        }
-        EPD_1IN54_V2_DisplayPart(BlackImage);
-        DEV_Delay_ms(500);//Analog clock 1s
+#if 1
+  switch(cur_moisture)
+  {
+    case VERYDRY:
+      iot.send("plant_moisture", "非常干燥");
+    case DRY:
+      iot.send("plant_moisture", "干燥");
+    case VERYWET:
+      iot.send("plant_moisture", "非常湿润");
+    case WET:
+      iot.send("plant_moisture", "湿润");
     }
 
-#endif
+  iot.send("humidity", cur_humidity);
+  iot.send("temperature", cur_temperature);
+  #endif
 }
 
+unsigned long lastMsMain = 0;
 /* The main loop -------------------------------------------------------------*/
 void loop()
 {
@@ -117,13 +124,32 @@ void loop()
   int count = 0;
   cur_moisture = getSoilMoistureStatus();
 
+  iot.loop();
+
   if(cur_moisture != old_moisture)
   {
     //更新墨水屏植物状态
     old_moisture = cur_moisture;
     partUpdateMoisture(cur_moisture);
-    
+#if 1
+    //mqtt更新温度
+    switch(cur_moisture)
+    {
+      case VERYDRY:
+        iot.send("plant_moisture", "非常干燥");
+      case DRY:
+        iot.send("plant_moisture", "干燥");
+      case VERYWET:
+        iot.send("plant_moisture", "非常湿润");
+      case WET:
+        iot.send("plant_moisture", "湿润");
+    }
+#endif   
     //如果dry，就启动pump
+    if((cur_moisture == VERYDRY) || (cur_moisture == DRY))
+    {
+      //启动抽水
+    }
   }
 
  // Reading temperature or humidity takes about 250 milliseconds!
@@ -145,6 +171,9 @@ void loop()
     //更新墨水屏状态
     old_humidity = cur_humidity;
     partUpdateHumidity(cur_humidity);
+
+    //mqtt更新湿度
+    iot.send("humidity", cur_humidity);
   }
 
   if(abs(cur_temperature - old_temperature) > 0.1)
@@ -152,6 +181,9 @@ void loop()
     //更新墨水屏状态
     old_temperature = cur_temperature;
     partUpdateTemperature(cur_temperature);
+
+    //mqtt更新温度
+    iot.send("temperature", cur_temperature);
   }
   
   count ++;
@@ -159,8 +191,42 @@ void loop()
   if(count == 100)
     updateEpd(cur_moisture, cur_humidity, cur_temperature);
 
-  delay(2000);
+  delay(5000);
 
+#if 0
+      AliyunIoTSDK::loop();
+    if (millis() - lastMsMain >= 5000)
+    {
+        lastMsMain = millis();
+        // 发送事件到阿里云平台
+        AliyunIoTSDK::sendEvent("xxx"); 
+        // 发送模型属性到阿里云平台
+        AliyunIoTSDK::send("temperature", cur_temperature);
+        AliyunIoTSDK::send("humidity", cur_humidity);
+    }
+
+#endif
+
+}
+
+void callback(JsonVariant p)
+{
+    Serial.println("custom topic callback");
+    serializeJsonPretty(p, Serial);
+    Serial.println();
+}
+
+void powerCallback(JsonVariant p)
+{
+    int PowerSwitch = p["PowerSwitch"];
+    if (PowerSwitch == 1)
+    {
+        //
+    }
+    else
+    {
+        //
+    }
 }
 
 void initEpd()
